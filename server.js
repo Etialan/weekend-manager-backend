@@ -43,11 +43,11 @@ const guestSchema = new mongoose.Schema({
 
 const Guest = mongoose.model('Guest', guestSchema);
 
-// Auth Middleware
+// Auth Middleware — tout utilisateur connecté (admin ou viewer)
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token provided' });
-  
+
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
@@ -57,26 +57,39 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
+// Admin Middleware — uniquement le rôle admin
+const adminOnly = (req, res, next) => {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Accès administrateur requis' });
+  }
+  next();
+};
+
 // Routes
 
 // Login
 app.post('/api/login', async (req, res) => {
   try {
     const { password } = req.body;
-    const familyPassword = process.env.FAMILY_PASSWORD;
-    
-    if (password === familyPassword) {
-      const token = jwt.sign({ family: true }, process.env.JWT_SECRET, { expiresIn: '30d' });
-      res.json({ token, success: true });
+    const adminPassword = process.env.ADMIN_PASSWORD || process.env.FAMILY_PASSWORD;
+    const viewPassword = process.env.VIEW_PASSWORD;
+
+    let role = null;
+    if (password === adminPassword) role = 'admin';
+    else if (viewPassword && password === viewPassword) role = 'viewer';
+
+    if (role) {
+      const token = jwt.sign({ family: true, role }, process.env.JWT_SECRET, { expiresIn: '30d' });
+      res.json({ token, role, success: true });
     } else {
-      res.status(401).json({ error: 'Invalid password', success: false });
+      res.status(401).json({ error: 'Mot de passe incorrect', success: false });
     }
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get all guests
+// Get all guests — admin + viewer
 app.get('/api/guests', authMiddleware, async (req, res) => {
   try {
     const guests = await Guest.find().sort({ createdAt: -1 });
@@ -86,7 +99,7 @@ app.get('/api/guests', authMiddleware, async (req, res) => {
   }
 });
 
-// Get single guest
+// Get single guest — admin + viewer
 app.get('/api/guests/:id', authMiddleware, async (req, res) => {
   try {
     const guest = await Guest.findById(req.params.id);
@@ -96,8 +109,8 @@ app.get('/api/guests/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// Create guest
-app.post('/api/guests', authMiddleware, async (req, res) => {
+// Create guest — admin uniquement
+app.post('/api/guests', authMiddleware, adminOnly, async (req, res) => {
   try {
     const guest = await Guest.create(req.body);
     res.json(guest);
@@ -106,8 +119,8 @@ app.post('/api/guests', authMiddleware, async (req, res) => {
   }
 });
 
-// Update guest
-app.put('/api/guests/:id', authMiddleware, async (req, res) => {
+// Update guest — admin uniquement
+app.put('/api/guests/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     req.body.updatedAt = new Date();
     const guest = await Guest.findByIdAndUpdate(req.params.id, req.body, { new: true });
@@ -117,8 +130,8 @@ app.put('/api/guests/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// Delete guest
-app.delete('/api/guests/:id', authMiddleware, async (req, res) => {
+// Delete guest — admin uniquement
+app.delete('/api/guests/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     await Guest.findByIdAndDelete(req.params.id);
     res.json({ ok: true, message: 'Guest deleted' });
@@ -127,8 +140,8 @@ app.delete('/api/guests/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// Bulk import
-app.post('/api/guests/bulk/import', authMiddleware, async (req, res) => {
+// Bulk import — admin uniquement
+app.post('/api/guests/bulk/import', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { guests } = req.body;
     const created = await Guest.insertMany(guests);
@@ -138,7 +151,7 @@ app.post('/api/guests/bulk/import', authMiddleware, async (req, res) => {
   }
 });
 
-// Export all guests
+// Export all guests — admin + viewer
 app.get('/api/export', authMiddleware, async (req, res) => {
   try {
     const guests = await Guest.find();
