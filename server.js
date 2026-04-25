@@ -43,6 +43,16 @@ const guestSchema = new mongoose.Schema({
 
 const Guest = mongoose.model('Guest', guestSchema);
 
+// Content Schema (page d'accueil + planning)
+const contentSchema = new mongoose.Schema({
+  welcomeTitle: { type: String, default: '' },
+  welcomeText:  { type: String, default: '' },
+  welcomeImages: { type: [String], default: [] },
+  planning: { type: Array, default: [] },
+  updatedAt: { type: Date, default: Date.now }
+});
+const Content = mongoose.model('Content', contentSchema);
+
 // Auth Middleware — tout utilisateur connecté (admin ou viewer)
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
@@ -156,6 +166,33 @@ app.get('/api/export', authMiddleware, async (req, res) => {
   try {
     const guests = await Guest.find();
     res.json(guests);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET content — admin + viewer
+app.get('/api/content', authMiddleware, async (req, res) => {
+  try {
+    let content = await Content.findOne();
+    if (!content) content = await Content.create({});
+    res.json(content);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT content — admin uniquement
+app.put('/api/content', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    req.body.updatedAt = new Date();
+    let content = await Content.findOne();
+    if (!content) {
+      content = await Content.create(req.body);
+    } else {
+      content = await Content.findByIdAndUpdate(content._id, req.body, { new: true });
+    }
+    res.json(content);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
