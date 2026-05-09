@@ -95,6 +95,20 @@ const stageCompletionSchema = new mongoose.Schema({
 });
 const StageCompletion = mongoose.model('StageCompletion', stageCompletionSchema);
 
+const mediaSchema = new mongoose.Schema({
+  huntId: mongoose.Schema.Types.ObjectId,
+  teamId: mongoose.Schema.Types.ObjectId,
+  stageId: mongoose.Schema.Types.ObjectId,
+  teamName: String,
+  stageLabel: String,
+  url: String,           // Cloudinary secure_url
+  publicId: String,      // Cloudinary public_id
+  resourceType: String,  // 'image' | 'video'
+  caption: String,
+  createdAt: { type: Date, default: Date.now },
+});
+const Media = mongoose.model('Media', mediaSchema);
+
 // ─── Middleware Auth ──────────────────────────────────────────────────────────
 
 const authMiddleware = (req, res, next) => {
@@ -622,6 +636,52 @@ app.get('/api/hunt/:huntId/scoreboard', authMiddleware, adminOnly, async (req, r
       return b.stagesCompleted - a.stagesCompleted;
     });
     res.json({ teams: result, stages });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── Routes Media ─────────────────────────────────────────────────────────────
+
+// Équipe : enregistrer un média uploadé sur Cloudinary
+app.post('/api/hunt/team/media', teamMiddleware, async (req, res) => {
+  try {
+    const { url, publicId, resourceType, caption, stageId, stageLabel } = req.body;
+    if (!url) return res.status(400).json({ error: 'URL manquante' });
+    const team = await Team.findById(req.user.teamId);
+    if (!team) return res.status(404).json({ error: 'Équipe non trouvée' });
+    const media = await Media.create({
+      huntId: team.huntId,
+      teamId: team._id,
+      teamName: team.name,
+      stageId: stageId || null,
+      stageLabel: stageLabel || null,
+      url,
+      publicId,
+      resourceType: resourceType || 'image',
+      caption: caption || '',
+    });
+    res.json(media);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin : lister tous les médias d'une partie
+app.get('/api/hunt/:huntId/media', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const media = await Media.find({ huntId: req.params.huntId }).sort({ createdAt: -1 });
+    res.json(media);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin : supprimer un média
+app.delete('/api/hunt/:huntId/media/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await Media.findByIdAndDelete(req.params.id);
+    res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
