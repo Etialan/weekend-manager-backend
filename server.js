@@ -70,7 +70,7 @@ const stageSchema = new mongoose.Schema({
   activityInstructions: String,
   question: String,
   answerExpected: String,
-  nextClue: String,
+  clueToReach: String,  // indice pour TROUVER cette étape (affiché à l'équipe avant d'y arriver)
 });
 const Stage = mongoose.model('Stage', stageSchema);
 
@@ -324,12 +324,8 @@ app.get('/api/hunt/team/me', teamMiddleware, async (req, res) => {
       currentStage = await Stage.findById(team.stageOrder[team.currentStageIndex]);
     }
 
-    let previousNextClue = null;
-    if (team.currentStageIndex > 0) {
-      const prevStageId = team.stageOrder[team.currentStageIndex - 1];
-      const prevStage = await Stage.findById(prevStageId);
-      previousNextClue = prevStage ? prevStage.nextClue : null;
-    }
+    // L'indice à afficher = clueToReach de l'étape COURANTE (comment y arriver)
+    const currentClue = currentStage ? currentStage.clueToReach : null;
 
     let hasArrived = false;
     let activityInstructions = null;
@@ -366,7 +362,7 @@ app.get('/api/hunt/team/me', teamMiddleware, async (req, res) => {
         activityInstructions,
         question,
       } : null,
-      previousNextClue,
+      currentClue,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -439,7 +435,13 @@ app.post('/api/hunt/team/answer', teamMiddleware, async (req, res) => {
         currentStageIndex: newIndex,
         ...(isFinished ? { status: 'finished', finishedAt: new Date() } : {}),
       });
-      res.json({ correct: true, nextClue: stage.nextClue, finished: isFinished });
+      // Renvoyer le clueToReach de la prochaine étape réelle de cette équipe
+      let nextClue = null;
+      if (!isFinished) {
+        const nextStage = await Stage.findById(team.stageOrder[newIndex]);
+        nextClue = nextStage ? nextStage.clueToReach : null;
+      }
+      res.json({ correct: true, nextClue, finished: isFinished });
     } else {
       await completion.save();
       res.json({ correct: false, attempts: completion.attempts });
