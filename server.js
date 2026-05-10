@@ -600,6 +600,37 @@ app.delete('/api/hunt/:huntId/teams/:id', authMiddleware, adminOnly, async (req,
   }
 });
 
+// Régénérer l'ordre aléatoire d'une équipe
+app.post('/api/hunt/:huntId/teams/:id/shuffle', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const stages = await Stage.find({ huntId: req.params.huntId });
+    const stageOrder = shuffle(stages.map(s => s._id));
+    const team = await Team.findByIdAndUpdate(
+      req.params.id,
+      { stageOrder, currentStageIndex: 0 },
+      { new: true }
+    );
+    res.json(team);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Définir manuellement l'ordre d'une équipe
+app.put('/api/hunt/:huntId/teams/:id/order', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { stageOrder } = req.body;
+    const team = await Team.findByIdAndUpdate(
+      req.params.id,
+      { stageOrder },
+      { new: true }
+    );
+    res.json(team);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/hunt/:huntId/scoreboard', authMiddleware, adminOnly, async (req, res) => {
   try {
     const teams = await Team.find({ huntId: req.params.huntId });
