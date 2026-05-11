@@ -526,6 +526,24 @@ app.post('/api/hunt/:huntId/finish', authMiddleware, adminOnly, async (req, res)
   }
 });
 
+app.delete('/api/hunt/:huntId', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { huntId } = req.params;
+    // Récupérer toutes les équipes pour effacer leurs StageCompletions
+    const teams = await Team.find({ huntId });
+    for (const team of teams) {
+      await StageCompletion.deleteMany({ teamId: team._id });
+    }
+    await Team.deleteMany({ huntId });
+    await Stage.deleteMany({ huntId });
+    await Media.deleteMany({ huntId });
+    await Hunt.findByIdAndDelete(huntId);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/hunt/:huntId/stages', authMiddleware, adminOnly, async (req, res) => {
   try {
     const stages = await Stage.find({ huntId: req.params.huntId }).sort({ order: 1 });
