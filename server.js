@@ -758,6 +758,8 @@ const quizQuestionSchema = new mongoose.Schema({
   approved: { type: Boolean, default: true },      // false = suggestion en attente
   status: { type: String, default: 'pending' },    // pending | active | revealed | done
   timerSeconds: { type: Number, default: 30 },     // 0 = pas de timer
+  mediaUrl: String,        // URL Cloudinary (image ou vidéo)
+  mediaType: String,       // 'image' | 'video'
   startedAt: Date,
   revealedAt: Date,
 });
