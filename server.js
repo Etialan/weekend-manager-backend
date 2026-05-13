@@ -738,6 +738,366 @@ app.delete('/api/hunt/:huntId/media/:id', authMiddleware, adminOnly, async (req,
   }
 });
 
+// ─── Schemas Quiz ─────────────────────────────────────────────────────────────
+
+const quizSessionSchema = new mongoose.Schema({
+  name: String,
+  status: { type: String, default: 'idle' }, // idle | active | finished
+  currentQuestionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  createdAt: { type: Date, default: Date.now },
+});
+const QuizSession = mongoose.model('QuizSession', quizSessionSchema);
+
+const quizQuestionSchema = new mongoose.Schema({
+  quizId: mongoose.Schema.Types.ObjectId,
+  text: String,
+  choices: [{ id: String, text: String }],  // ex: [{id:'A', text:'Paris'}, ...]
+  correctChoiceId: String,
+  order: { type: Number, default: 0 },
+  proposedBy: { type: String, default: 'admin' }, // 'admin' ou nom participant
+  approved: { type: Boolean, default: true },      // false = suggestion en attente
+  status: { type: String, default: 'pending' },    // pending | active | revealed | done
+  timerSeconds: { type: Number, default: 30 },     // 0 = pas de timer
+  startedAt: Date,
+  revealedAt: Date,
+});
+const QuizQuestion = mongoose.model('QuizQuestion', quizQuestionSchema);
+
+const quizParticipantSchema = new mongoose.Schema({
+  quizId: mongoose.Schema.Types.ObjectId,
+  name: String,
+  joinedAt: { type: Date, default: Date.now },
+});
+const QuizParticipant = mongoose.model('QuizParticipant', quizParticipantSchema);
+
+const quizAnswerSchema = new mongoose.Schema({
+  quizId: mongoose.Schema.Types.ObjectId,
+  questionId: mongoose.Schema.Types.ObjectId,
+  participantId: mongoose.Schema.Types.ObjectId,
+  participantName: String,
+  choiceId: String,
+  isCorrect: Boolean,
+  responseTimeMs: Number,
+  answeredAt: { type: Date, default: Date.now },
+});
+const QuizAnswer = mongoose.model('QuizAnswer', quizAnswerSchema);
+
+// ─── Middleware Quiz Participant ───────────────────────────────────────────────
+
+const quizParticipantMiddleware = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'quizParticipant') return res.status(403).json({ error: 'Token quiz requis' });
+    req.user = decoded;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+// ─── Routes Quiz — Participant (AVANT les routes /:quizId) ────────────────────
+
+// Rejoindre un quiz (crée ou retrouve le participant, retourne un JWT)
+app.post('/api/quiz/participant/join', async (req, res) => {
+  try {
+    const { name, quizId } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Nom requis' });
+    // Trouver le quiz actif si quizId non précisé
+    let quiz;
+    if (quizId) {
+      quiz = await QuizSession.findById(quizId);
+    } else {
+      quiz = await QuizSession.findOne({ status: { $in: ['idle', 'active'] } }).sort({ createdAt: -1 });
+    }
+    if (!quiz) return res.status(404).json({ error: 'Aucun quiz disponible' });
+    // Créer ou retrouver le participant (même nom + même quizId)
+    let participant = await QuizParticipant.findOne({ quizId: quiz._id, name: name.trim() });
+    if (!participant) {
+      participant = await QuizParticipant.create({ quizId: quiz._id, name: name.trim() });
+    }
+    const token = jwt.sign(
+      { role: 'quizParticipant', participantId: participant._id.toString(), quizId: quiz._id.toString(), name: participant.name },
+      process.env.JWT_SECRET,
+      { expiresIn: '12h' }
+    );
+    res.json({ token, participant: { id: participant._id, name: participant.name }, quiz: { id: quiz._id, name: quiz.name, status: quiz.status } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// État courant pour le participant (polling 2s)
+app.get('/api/quiz/participant/state', quizParticipantMiddleware, async (req, res) => {
+  try {
+    const quiz = await QuizSession.findById(req.user.quizId);
+    if (!quiz) return res.status(404).json({ error: 'Quiz introuvable' });
+    let currentQuestion = null;
+    let myAnswer = null;
+    if (quiz.currentQuestionId) {
+      const q = await QuizQuestion.findById(quiz.currentQuestionId);
+      if (q) {
+        // Ne jamais envoyer correctChoiceId tant que non révélé
+        currentQuestion = {
+          _id: q._id,
+          text: q.text,
+          choices: q.choices,
+          status: q.status,
+          timerSeconds: q.timerSeconds,
+          startedAt: q.startedAt,
+          // correctChoiceId envoyé seulement si révélé
+          correctChoiceId: (q.status === 'revealed' || q.status === 'done') ? q.correctChoiceId : undefined,
+        };
+        myAnswer = await QuizAnswer.findOne({ questionId: q._id, participantId: req.user.participantId });
+      }
+    }
+    res.json({
+      quiz: { id: quiz._id, name: quiz.name, status: quiz.status },
+      currentQuestion,
+      myAnswer: myAnswer ? { choiceId: myAnswer.choiceId, isCorrect: myAnswer.isCorrect } : null,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Soumettre une réponse
+app.post('/api/quiz/participant/answer', quizParticipantMiddleware, async (req, res) => {
+  try {
+    const { questionId, choiceId } = req.body;
+    const question = await QuizQuestion.findById(questionId);
+    if (!question || question.status !== 'active') return res.status(400).json({ error: 'Question non active' });
+    // Vérifier que le timer n'a pas expiré
+    if (question.timerSeconds > 0 && question.startedAt) {
+      const elapsed = (Date.now() - new Date(question.startedAt).getTime()) / 1000;
+      if (elapsed > question.timerSeconds + 2) return res.status(400).json({ error: 'Temps écoulé' });
+    }
+    // Réponse déjà soumise ?
+    const existing = await QuizAnswer.findOne({ questionId, participantId: req.user.participantId });
+    if (existing) return res.status(400).json({ error: 'Déjà répondu' });
+    const isCorrect = choiceId === question.correctChoiceId;
+    const responseTimeMs = question.startedAt ? Date.now() - new Date(question.startedAt).getTime() : 0;
+    const answer = await QuizAnswer.create({
+      quizId: req.user.quizId, questionId, participantId: req.user.participantId,
+      participantName: req.user.name, choiceId, isCorrect, responseTimeMs,
+    });
+    res.json({ ok: true, isCorrect });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Proposer une question (suggestion participant)
+app.post('/api/quiz/participant/suggest', quizParticipantMiddleware, async (req, res) => {
+  try {
+    const { text, choices, correctChoiceId, timerSeconds } = req.body;
+    if (!text || !choices || choices.length < 2 || !correctChoiceId) {
+      return res.status(400).json({ error: 'Question incomplète' });
+    }
+    const quiz = await QuizSession.findById(req.user.quizId);
+    if (!quiz || quiz.status === 'finished') return res.status(400).json({ error: 'Quiz non disponible' });
+    const count = await QuizQuestion.countDocuments({ quizId: req.user.quizId, approved: true });
+    const question = await QuizQuestion.create({
+      quizId: req.user.quizId, text, choices, correctChoiceId,
+      order: count + 1, proposedBy: req.user.name,
+      approved: false, timerSeconds: timerSeconds || 30,
+    });
+    res.json({ ok: true, question: { _id: question._id, text: question.text } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Classement (disponible pour participants)
+app.get('/api/quiz/participant/leaderboard', quizParticipantMiddleware, async (req, res) => {
+  try {
+    const answers = await QuizAnswer.find({ quizId: req.user.quizId });
+    const participants = await QuizParticipant.find({ quizId: req.user.quizId });
+    const scores = {};
+    for (const p of participants) {
+      scores[p._id] = { name: p.name, correct: 0, totalTimeMs: 0 };
+    }
+    for (const a of answers) {
+      const key = a.participantId.toString();
+      if (!scores[key]) scores[key] = { name: a.participantName, correct: 0, totalTimeMs: 0 };
+      if (a.isCorrect) { scores[key].correct++; scores[key].totalTimeMs += a.responseTimeMs; }
+    }
+    const leaderboard = Object.values(scores)
+      .sort((a, b) => b.correct - a.correct || a.totalTimeMs - b.totalTimeMs);
+    res.json(leaderboard);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── Routes Quiz — Admin ───────────────────────────────────────────────────────
+
+app.get('/api/quiz', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    res.json(await QuizSession.find().sort({ createdAt: -1 }));
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/quiz', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const quiz = await QuizSession.create({ name: req.body.name });
+    res.json(quiz);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.delete('/api/quiz/:quizId', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { quizId } = req.params;
+    await QuizAnswer.deleteMany({ quizId });
+    await QuizQuestion.deleteMany({ quizId });
+    await QuizParticipant.deleteMany({ quizId });
+    await QuizSession.findByIdAndDelete(quizId);
+    res.json({ ok: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Questions CRUD
+app.get('/api/quiz/:quizId/questions', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    res.json(await QuizQuestion.find({ quizId: req.params.quizId }).sort({ order: 1, createdAt: 1 }));
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/quiz/:quizId/questions', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const count = await QuizQuestion.countDocuments({ quizId: req.params.quizId, approved: true });
+    const q = await QuizQuestion.create({ ...req.body, quizId: req.params.quizId, order: count + 1, approved: true });
+    res.json(q);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.put('/api/quiz/:quizId/questions/:qid', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const q = await QuizQuestion.findByIdAndUpdate(req.params.qid, req.body, { new: true });
+    res.json(q);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.delete('/api/quiz/:quizId/questions/:qid', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await QuizQuestion.findByIdAndDelete(req.params.qid);
+    await QuizAnswer.deleteMany({ questionId: req.params.qid });
+    res.json({ ok: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Approuver / rejeter une suggestion
+app.patch('/api/quiz/:quizId/questions/:qid/approve', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const q = await QuizQuestion.findByIdAndUpdate(req.params.qid, { approved: true }, { new: true });
+    res.json(q);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.patch('/api/quiz/:quizId/questions/:qid/reject', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await QuizQuestion.findByIdAndDelete(req.params.qid);
+    res.json({ ok: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Démarrer le quiz
+app.post('/api/quiz/:quizId/start', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const quiz = await QuizSession.findByIdAndUpdate(req.params.quizId, { status: 'active' }, { new: true });
+    res.json(quiz);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Lancer une question (la rendre active)
+app.post('/api/quiz/:quizId/launch/:qid', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    // Marquer l'ancienne question comme done
+    await QuizQuestion.updateMany({ quizId: req.params.quizId, status: 'active' }, { status: 'done' });
+    await QuizQuestion.updateMany({ quizId: req.params.quizId, status: 'revealed' }, { status: 'done' });
+    const q = await QuizQuestion.findByIdAndUpdate(
+      req.params.qid,
+      { status: 'active', startedAt: new Date() },
+      { new: true }
+    );
+    await QuizSession.findByIdAndUpdate(req.params.quizId, { currentQuestionId: q._id });
+    res.json(q);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Révéler la réponse
+app.post('/api/quiz/:quizId/reveal/:qid', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const q = await QuizQuestion.findByIdAndUpdate(
+      req.params.qid,
+      { status: 'revealed', revealedAt: new Date() },
+      { new: true }
+    );
+    res.json(q);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Terminer le quiz
+app.post('/api/quiz/:quizId/finish', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await QuizQuestion.updateMany({ quizId: req.params.quizId, status: { $in: ['active', 'revealed'] } }, { status: 'done' });
+    const quiz = await QuizSession.findByIdAndUpdate(
+      req.params.quizId,
+      { status: 'finished', currentQuestionId: null },
+      { new: true }
+    );
+    res.json(quiz);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Reset du quiz
+app.post('/api/quiz/:quizId/reset', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await QuizAnswer.deleteMany({ quizId: req.params.quizId });
+    await QuizParticipant.deleteMany({ quizId: req.params.quizId });
+    await QuizQuestion.updateMany({ quizId: req.params.quizId }, { status: 'pending', startedAt: null, revealedAt: null });
+    await QuizSession.findByIdAndUpdate(req.params.quizId, { status: 'idle', currentQuestionId: null });
+    res.json({ ok: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// État live (admin) — participants + comptage réponses par question
+app.get('/api/quiz/:quizId/live', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const quiz = await QuizSession.findById(req.params.quizId);
+    const participants = await QuizParticipant.find({ quizId: req.params.quizId });
+    let currentQuestion = null;
+    let answerCount = 0;
+    if (quiz.currentQuestionId) {
+      currentQuestion = await QuizQuestion.findById(quiz.currentQuestionId);
+      answerCount = await QuizAnswer.countDocuments({ questionId: quiz.currentQuestionId });
+    }
+    res.json({ quiz, participants, participantCount: participants.length, currentQuestion, answerCount });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Classement admin
+app.get('/api/quiz/:quizId/leaderboard', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const answers = await QuizAnswer.find({ quizId: req.params.quizId });
+    const participants = await QuizParticipant.find({ quizId: req.params.quizId });
+    const scores = {};
+    for (const p of participants) {
+      scores[p._id] = { name: p.name, correct: 0, totalTimeMs: 0, answers: 0 };
+    }
+    for (const a of answers) {
+      const key = a.participantId.toString();
+      if (!scores[key]) scores[key] = { name: a.participantName, correct: 0, totalTimeMs: 0, answers: 0 };
+      scores[key].answers++;
+      if (a.isCorrect) { scores[key].correct++; scores[key].totalTimeMs += a.responseTimeMs; }
+    }
+    const leaderboard = Object.values(scores)
+      .sort((a, b) => b.correct - a.correct || a.totalTimeMs - b.totalTimeMs);
+    res.json(leaderboard);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 // ─── Health check ─────────────────────────────────────────────────────────────
 
 app.get('/api/health', (req, res) => {
