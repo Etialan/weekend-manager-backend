@@ -749,7 +749,7 @@ const quizSessionSchema = new mongoose.Schema({
 const QuizSession = mongoose.model('QuizSession', quizSessionSchema);
 
 const quizQuestionSchema = new mongoose.Schema({
-  quizId: mongoose.Schema.Types.ObjectId,
+  quizId: { type: mongoose.Schema.Types.ObjectId, default: null }, // null = dans le pot commun
   text: String,
   choices: [{ id: String, text: String }],  // ex: [{id:'A', text:'Paris'}, ...]
   correctChoiceId: String,
@@ -808,6 +808,24 @@ app.get('/api/quiz/public/list', async (req, res) => {
       .sort({ createdAt: -1 })
       .select('_id name status');
     res.json(quizzes);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Proposer une question (public, sans compte) → va dans le pot commun (quizId=null)
+app.post('/api/quiz/public/suggest', async (req, res) => {
+  try {
+    const { name, text, choices, correctChoiceId, timerSeconds } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Pseudo requis' });
+    if (!text || !choices || choices.length < 2 || !correctChoiceId) {
+      return res.status(400).json({ error: 'Question incomplète' });
+    }
+    const question = await QuizQuestion.create({
+      quizId: null, text, choices, correctChoiceId,
+      proposedBy: name.trim(), approved: false, timerSeconds: timerSeconds || 30,
+    });
+    res.json({ ok: true, question: { _id: question._id, text: question.text } });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -904,20 +922,16 @@ app.post('/api/quiz/participant/answer', quizParticipantMiddleware, async (req, 
   }
 });
 
-// Proposer une question (suggestion participant)
+// Proposer une question (participant connecté) → pot commun (quizId=null), admin allouera
 app.post('/api/quiz/participant/suggest', quizParticipantMiddleware, async (req, res) => {
   try {
     const { text, choices, correctChoiceId, timerSeconds } = req.body;
     if (!text || !choices || choices.length < 2 || !correctChoiceId) {
       return res.status(400).json({ error: 'Question incomplète' });
     }
-    const quiz = await QuizSession.findById(req.user.quizId);
-    if (!quiz || quiz.status === 'finished') return res.status(400).json({ error: 'Quiz non disponible' });
-    const count = await QuizQuestion.countDocuments({ quizId: req.user.quizId, approved: true });
     const question = await QuizQuestion.create({
-      quizId: req.user.quizId, text, choices, correctChoiceId,
-      order: count + 1, proposedBy: req.user.name,
-      approved: false, timerSeconds: timerSeconds || 30,
+      quizId: null, text, choices, correctChoiceId,
+      proposedBy: req.user.name, approved: false, timerSeconds: timerSeconds || 30,
     });
     res.json({ ok: true, question: { _id: question._id, text: question.text } });
   } catch (error) {
@@ -945,6 +959,42 @@ app.get('/api/quiz/participant/leaderboard', quizParticipantMiddleware, async (r
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// ─── Routes Quiz — Admin : Pot commun suggestions ────────────────────────────
+
+// Lister toutes les suggestions en attente (quizId=null, approved=false)
+app.get('/api/quiz/admin/suggestions', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const suggestions = await QuizQuestion.find({ quizId: null, approved: false }).sort({ _id: -1 });
+    res.json(suggestions);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Assigner une suggestion à un quiz (+ l'approuve)
+app.post('/api/quiz/admin/suggestions/:qid/assign', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { targetQuizId } = req.body;
+    if (!targetQuizId) return res.status(400).json({ error: 'targetQuizId requis' });
+    const quiz = await QuizSession.findById(targetQuizId);
+    if (!quiz) return res.status(404).json({ error: 'Quiz introuvable' });
+    const count = await QuizQuestion.countDocuments({ quizId: targetQuizId, approved: true });
+    const q = await QuizQuestion.findByIdAndUpdate(
+      req.params.qid,
+      { quizId: targetQuizId, approved: true, order: count + 1, status: 'pending' },
+      { new: true }
+    );
+    if (!q) return res.status(404).json({ error: 'Suggestion introuvable' });
+    res.json(q);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Rejeter (supprimer) une suggestion
+app.delete('/api/quiz/admin/suggestions/:qid', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await QuizQuestion.findByIdAndDelete(req.params.qid);
+    res.json({ ok: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ─── Routes Quiz — Admin ───────────────────────────────────────────────────────
