@@ -799,6 +799,20 @@ const quizParticipantMiddleware = (req, res, next) => {
   }
 };
 
+// ─── Routes Quiz — Public (sans auth) ────────────────────────────────────────
+
+// Liste des quiz disponibles (idle ou active) — pour la page de connexion participant
+app.get('/api/quiz/public/list', async (req, res) => {
+  try {
+    const quizzes = await QuizSession.find({ status: { $in: ['idle', 'active'] } })
+      .sort({ createdAt: -1 })
+      .select('_id name status');
+    res.json(quizzes);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── Routes Quiz — Participant (AVANT les routes /:quizId) ────────────────────
 
 // Rejoindre un quiz (crée ou retrouve le participant, retourne un JWT)
