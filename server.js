@@ -42,9 +42,13 @@ const Guest = mongoose.model('Guest', guestSchema);
 
 const contentSchema = new mongoose.Schema({
   welcomeTitle: { type: String, default: '' },
-  welcomeText:  { type: String, default: '' },
+  welcomeText:  { type: String, default: '' },  // stocké en HTML
   welcomeImages: { type: [String], default: [] },
   planning: { type: Array, default: [] },
+  eventDate:   { type: String, default: '' },   // ISO datetime ex: "2026-06-14T18:00"
+  venueLat:    { type: String, default: '' },   // latitude GPS du lieu
+  venueLng:    { type: String, default: '' },   // longitude GPS du lieu
+  venueLabel:  { type: String, default: '' },   // nom affiché ex: "Domaine de Bel Air"
   updatedAt: { type: Date, default: Date.now }
 });
 const Content = mongoose.model('Content', contentSchema);
